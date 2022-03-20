@@ -8,3 +8,6 @@
 /pushprox-proxy
 
 /vendor
+
+.idea
+.vscode

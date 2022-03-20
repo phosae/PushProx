@@ -1,0 +1,9 @@
+proxy_addr: 127.1:7080
+metrics:
+- addr: '127.1:8889'
+  path: /metrics
+  name: demo
+- addr: '127.0.0.1:8900'
+  path: /metrics
+label_pairs:
+  env: test
