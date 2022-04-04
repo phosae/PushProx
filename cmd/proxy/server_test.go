@@ -1,13 +1,12 @@
-package proxy
+package main
 
 import (
 	"fmt"
+	"github.com/go-kit/log"
 	"net"
 	"net/http"
 	"os"
 	"testing"
-
-	"github.com/go-kit/log"
 )
 
 func TestServer(t *testing.T) {

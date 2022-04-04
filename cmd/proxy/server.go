@@ -1,14 +1,15 @@
-package proxy
+package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +28,9 @@ var (
 	listenServerAddress  = kingpin.Flag("web.server-address", "Address to listen on for client requests.").Default(":7080").String()
 	maxScrapeTimeout     = kingpin.Flag("scrape.max-timeout", "Any scrape with a timeout higher than this will have to be clamped to this.").Default("5m").Duration()
 	defaultScrapeTimeout = kingpin.Flag("scrape.default-timeout", "If a scrape lacks a timeout, use this value.").Default("15s").Duration()
+
+	authTokens    = kingpin.Flag("auth.tokens", "String contains comma split tokens, i.e pwd-a,token-x").String()
+	authTokenFile = kingpin.Flag("auth.token-file", "File contains comma split tokens, i.e pwd-a,token-x. If specified, auth.tokens will be ignored").String()
 )
 
 const (
@@ -92,16 +96,16 @@ func (s *server) HandleListener() {
 					return
 				}
 
-				var cstream net.Conn = stream
+				var sc net.Conn = stream
 				if token, ok := as.token.Load().(string); ok {
-					cstream, err = util.WrapAsCryptoConn(stream, []byte(token))
+					sc, err = util.WrapAsCryptoConn(stream, []byte(token))
 					if err != nil {
 						level.Warn(s.lg).Log("msg", fmt.Sprintf("wrap stream with crypto failed: %v", err))
 						session.Close()
 						return
 					}
 				}
-				go s.handleConnection(ctx, as, cstream)
+				go s.handleConnection(ctx, as, sc)
 			}
 		}()
 	}
@@ -252,61 +256,52 @@ func (h *httpHandler) handleScrape(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	now := time.Now()
-	defer func() {
-		cost := time.Now().Sub(now)
-		if cost > 3*time.Second {
-			level.Error(c.lg).Log("msg", "long handleScrape", "cost", cost)
-		}
-	}()
+	c.handleScrape(w, r)
+}
 
-	rwc, err := c.getScrapeConn()
-	if err != nil {
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+func getAuthTokens() ([]string, error) {
+	var tokens string
+	if authTokens != nil {
+		tokens = *authTokens
 	}
-	defer func() {
-		go func() {
-			c.registerScrapeConn(rwc.(net.Conn))
-		}()
-	}()
+	if authTokenFile != nil {
+		b, err := ioutil.ReadFile(*authTokenFile)
+		if err != nil {
+			return nil, err
+		}
+		tokens = string(b)
+	}
+	if tokens != "" {
+		return strings.Split(strings.TrimSpace(tokens), ","), nil
+	}
+	// default token is ""
+	return []string{""}, nil
+}
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+func main() {
+	kingpin.Parse()
+	l, err := net.Listen("tcp", *listenServerAddress)
+	logger := log.NewLogfmtLogger(os.Stdout)
+	if err != nil {
+		level.Error(logger).Log("error", err)
+		os.Exit(1)
+	}
+	tokens, err := getAuthTokens()
+	if err != nil {
+		level.Error(logger).Log("msg", "bad token args", "error", err)
+		os.Exit(1)
+	}
+	s := &server{
+		l:       l,
+		lg:      logger,
+		remotes: map[string]*Coordinator{},
+		tokens:  tokens,
+	}
+	s.lg.Log("msg", fmt.Sprintf("handle proxyc request on %s", *listenServerAddress))
+	ha := newHttpHandler(s, log.NewLogfmtLogger(os.Stdout))
 	go func() {
-		now := time.Now()
-		defer func() {
-			cost := time.Now().Sub(now)
-			if cost > 3*time.Second {
-				level.Error(c.lg).Log("msg", "long write scrape request", "cost", cost)
-			}
-		}()
-		defer wg.Done()
-		err := r.Write(rwc)
-		if err != nil {
-			//todo log
-			rwc.Close()
-		}
+		s.lg.Log("msg", fmt.Sprintf("handle prometheus request on %s", *listenPxyAddress))
+		http.ListenAndServe(*listenPxyAddress, ha)
 	}()
-	go func() {
-		now := time.Now()
-		defer func() {
-			cost := time.Now().Sub(now)
-			if cost > 3*time.Second {
-				level.Error(c.lg).Log("msg", "long read scrape response", "cost", cost)
-			}
-		}()
-		defer wg.Done()
-		resp, err := http.ReadResponse(bufio.NewReader(rwc), nil)
-		if err != nil {
-			rwc.Close()
-			return
-		}
-		for k, v := range resp.Header {
-			w.Header()[k] = v
-		}
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	}()
-	wg.Wait()
+	s.StartServe()
 }

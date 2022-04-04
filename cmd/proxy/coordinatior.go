@@ -1,9 +1,11 @@
-package proxy
+package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -52,7 +54,7 @@ func (c *Coordinator) KnownTargets() []string {
 	return known
 }
 
-func (c *Coordinator) getScrapeConn() (net.Conn, error) {
+func (c *Coordinator) getScrapeConn(timeout time.Duration) (net.Conn, error) {
 	select {
 	case conn, ok := <-c.scrapeConnCh:
 		if ok {
@@ -70,7 +72,7 @@ func (c *Coordinator) getScrapeConn() (net.Conn, error) {
 	select {
 	case conn := <-c.scrapeConnCh:
 		return conn, nil
-	case <-time.After(10 * time.Second):
+	case <-time.After(timeout):
 		return nil, fmt.Errorf("err timeout getScrapeConn")
 	}
 }
@@ -82,6 +84,54 @@ func (c *Coordinator) registerScrapeConn(conn net.Conn) {
 		}
 	}()
 	c.scrapeConnCh <- conn
+}
+
+func (c *Coordinator) handleScrape(w http.ResponseWriter, r *http.Request) {
+	if r.Header == nil {
+		r.Header = map[string][]string{}
+	}
+	util.EnsureHeaderTimeout(maxScrapeTimeout, defaultScrapeTimeout, r.Header)
+	timeout, _ := util.GetHeaderTimeout(r.Header)
+	rwc, err := c.getScrapeConn(timeout)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	defer func() {
+		go func() {
+			if len(c.scrapeConnCh) == cap(c.scrapeConnCh) {
+				rwc.Close()
+			} else {
+				c.registerScrapeConn(rwc)
+			}
+		}()
+	}()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		err := r.Write(rwc)
+		if err != nil {
+			level.Error(c.lg).Log("msg", "failed to write connection", "err", err)
+			rwc.Close()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		resp, err := http.ReadResponse(bufio.NewReader(rwc), nil)
+		if err != nil {
+			rwc.Close()
+			return
+		}
+		for k, v := range resp.Header {
+			w.Header()[k] = v
+		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+	}()
+	wg.Wait()
 }
 
 func (c *Coordinator) start() {

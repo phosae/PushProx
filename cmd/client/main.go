@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -68,7 +69,7 @@ func (c *Config) complete() {
 	}
 	for i := range c.Eps {
 		if c.Eps[i].Name == "" {
-			c.Eps[i].Name = util.RandString(5)
+			c.Eps[i].Name = base64.URLEncoding.EncodeToString([]byte(fmt.Sprintf("%s%s", c.Eps[i].Addr, c.Eps[i].Path)))
 		}
 	}
 }
@@ -104,7 +105,6 @@ func main() {
 	}
 
 	sigTerm := util.SetupSignalHandler()
-
 	go func() {
 		backoff.RetryNotify(
 			func() error {

@@ -74,8 +74,7 @@ func (r *reader) Read(p []byte) (n int, err error) {
 
 		block, err := aes.NewCipher(r.key)
 		if err != nil {
-			err = err
-			return
+			return 0, err
 		}
 		r.dec = &cipher.StreamReader{
 			S: cipher.NewCFBDecrypter(block, iv),

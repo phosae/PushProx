@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -213,27 +214,38 @@ func (c *Coordinator) handleScrape(scon net.Conn) {
 			continue
 		}
 
-		request.URL = target
-		scrapeResp, err := c.transport.RoundTrip(request)
+		timeout, err := util.GetHeaderTimeout(request.Header)
 		if err != nil {
-			msg := fmt.Sprintf("failed to scrape %s", request.URL.String())
-			c.handleErr(scon, request, errors.Wrap(err, msg))
-			continue
-		}
-		if c.modifyResponse != nil {
-			err = c.modifyResponse(scrapeResp)
-			if err != nil {
-				msg := fmt.Sprintf("failed to mutate scraped response, process: %s", process)
-				c.handleErr(scon, request, errors.Wrap(err, msg))
-				continue
-			}
-		}
-		err = scrapeResp.Write(scon)
-		if err != nil {
-			level.Error(c.lg).Log("msg", "write scrape result", "err", err)
-			scon.Close()
+			c.handleErr(scon, request, err)
 			return
 		}
+
+		func() {
+			ctx, cancel := context.WithTimeout(request.Context(), timeout)
+			defer cancel()
+			request = request.WithContext(ctx)
+			request.URL = target
+			scrapeResp, err := c.transport.RoundTrip(request)
+			if err != nil {
+				msg := fmt.Sprintf("failed to scrape %s", request.URL.String())
+				c.handleErr(scon, request, errors.Wrap(err, msg))
+				return
+			}
+			if c.modifyResponse != nil {
+				err = c.modifyResponse(scrapeResp)
+				if err != nil {
+					msg := fmt.Sprintf("failed to mutate scraped response, process: %s", process)
+					c.handleErr(scon, request, errors.Wrap(err, msg))
+					return
+				}
+			}
+			err = scrapeResp.Write(scon)
+			if err != nil {
+				level.Error(c.lg).Log("msg", "write scrape result", "err", err)
+				scon.Close()
+				return
+			}
+		}()
 	}
 }
 
