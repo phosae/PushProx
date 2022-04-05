@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -76,11 +77,7 @@ func makeEndpointUrls(eps []Endpoint) (map[string]*url.URL, error) {
 		if _, ok := processes[eps[i].Name]; ok {
 			return nil, fmt.Errorf("duplicate Endpoint, name: %s", eps[i].Name)
 		}
-		URL, err := eps[i].Url()
-		if err != nil {
-			return nil, fmt.Errorf("invalid Endpoint[%d]{%v}: %v", i, eps[i], err)
-		}
-		processes[eps[i].Name] = URL
+		processes[eps[i].Name] = eps[i].URL
 	}
 	return processes, nil
 }
@@ -95,15 +92,59 @@ func NewCoordinator(c *Config) (*Coordinator, error) {
 		ts = http.DefaultTransport
 	}
 
+	pxyAddrs := strings.Split(strings.TrimSpace(c.ProxyAddr), ",")
+	if len(pxyAddrs) == 0 {
+		return nil, errors.New("proxy address must be specified")
+	}
+
 	return &Coordinator{
 		lg:             c.logger,
-		proxyAddr:      c.ProxyAddr,
+		proxyAddr:      pxyAddrs[rand.Int63()%int64(len(pxyAddrs))],
 		token:          c.Token,
 		fqdn:           c.FQDN,
 		processes:      processes,
 		transport:      ts,
 		modifyResponse: c.rspModifier,
 	}, nil
+}
+
+func (c *Coordinator) prepare() error {
+	var err error
+	c.tunnel, err = connectServer(c.proxyAddr, c.token)
+	if err != nil {
+		return fmt.Errorf("err connectServe: %v", err)
+	}
+
+	ctlConn, err := c.tunnel.OpenStream(true)
+	if err != nil {
+		return fmt.Errorf("err open control stream: %v", err)
+	}
+	ts := time.Now().Unix()
+	newClientMsg, err := (&util.NewClientMessage{Fqdn: c.fqdn, Timestamp: ts, Auth: util.SignAuth(c.token, ts)}).Marshal()
+	if err != nil {
+		ctlConn.Close()
+		return fmt.Errorf("err Marshal NewClientMessage: %v", err)
+	}
+	err = util.WriteMsg(ctlConn, util.MsgTypeNewMachine, newClientMsg)
+	if err != nil {
+		ctlConn.Close()
+		return fmt.Errorf("err send MsgTypeNewMachine: %v", err)
+	}
+
+	ctlConn, err = util.WrapAsCryptoConn(ctlConn, []byte(c.token))
+	if err != nil {
+		ctlConn.Close()
+		return fmt.Errorf("err wrap conn as CryptoConn: %v", err)
+	}
+	ctlConn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	msgType, _, err := util.ReadMsg(ctlConn)
+	if err != nil || msgType != util.MsgTypeNewMachineOK {
+		ctlConn.Close()
+		panic("err wait MsgTypeNewMachineOK, client auth failed, invalid token")
+	}
+	ctlConn.SetReadDeadline(time.Time{})
+	c.ctlConn = ctlConn
+	return nil
 }
 
 func (c *Coordinator) Start() {
@@ -147,44 +188,6 @@ func (c *Coordinator) Start() {
 	}
 }
 
-func (c *Coordinator) prepare() error {
-	var err error
-	c.tunnel, err = connectServer(c.proxyAddr, c.token)
-	if err != nil {
-		return fmt.Errorf("err connectServe: %v", err)
-	}
-
-	ctlConn, err := c.tunnel.OpenStream(true)
-	if err != nil {
-		return fmt.Errorf("err open control stream: %v", err)
-	}
-	ts := time.Now().Unix()
-	newClientMsg, err := (&util.NewClientMessage{Fqdn: c.fqdn, Timestamp: ts, Auth: util.SignAuth(c.token, ts)}).Marshal()
-	if err != nil {
-		ctlConn.Close()
-		return fmt.Errorf("err Marshal NewClientMessage: %v", err)
-	}
-	err = util.WriteMsg(ctlConn, util.MsgTypeNewMachine, newClientMsg)
-	if err != nil {
-		ctlConn.Close()
-		return fmt.Errorf("err send MsgTypeNewMachine: %v", err)
-	}
-
-	ctlConn, err = util.WrapAsCryptoConn(ctlConn, []byte(c.token))
-	if err != nil {
-		ctlConn.Close()
-		return fmt.Errorf("err wrap conn as CryptoConn: %v", err)
-	}
-	ctlConn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	msgType, _, err := util.ReadMsg(ctlConn)
-	if err != nil || msgType != util.MsgTypeNewMachineOK {
-		panic("err wait MsgTypeNewMachineOK, client auth failed, invalid token")
-	}
-	ctlConn.SetReadDeadline(time.Time{})
-	c.ctlConn = ctlConn
-	return nil
-}
-
 func (c *Coordinator) handleScrape(scon net.Conn) {
 	for {
 		request, err := http.ReadRequest(bufio.NewReader(scon))
@@ -195,19 +198,21 @@ func (c *Coordinator) handleScrape(scon net.Conn) {
 		}
 
 		request.RequestURI = ""
-		if request.Host != c.fqdn {
+		host, _, err := net.SplitHostPort(request.Host)
+		if err != nil {
+			c.handleErr(scon, request, fmt.Errorf("expect Host format <process-name>.fqdn, got %q", request.Host))
+			continue
+		}
+		parts := strings.SplitN(host, ".", 2)
+		if len(parts) != 2 {
+			c.handleErr(scon, request, fmt.Errorf("expect Host format <process-name>.fqdn, got %q", request.Host))
+			continue
+		}
+		if parts[1] != c.fqdn {
 			c.handleErr(scon, request, errors.New("scrape target doesn't match client fqdn"))
 			continue
 		}
-
-		var process string
-		paths := strings.Split(request.URL.Path, "/")
-		if !strings.HasPrefix(request.URL.Path, "/") && len(paths) > 0 {
-			process = paths[0]
-		}
-		if strings.HasPrefix(request.URL.Path, "/") && len(paths) > 1 {
-			process = paths[1]
-		}
+		var process = parts[0]
 		target, exist := c.processes[process]
 		if !exist {
 			c.handleErr(scon, request, errors.New("scrape target doesn't match client process name"))
@@ -217,7 +222,7 @@ func (c *Coordinator) handleScrape(scon net.Conn) {
 		timeout, err := util.GetHeaderTimeout(request.Header)
 		if err != nil {
 			c.handleErr(scon, request, err)
-			return
+			continue
 		}
 
 		func() {
@@ -231,7 +236,7 @@ func (c *Coordinator) handleScrape(scon net.Conn) {
 				c.handleErr(scon, request, errors.Wrap(err, msg))
 				return
 			}
-			if c.modifyResponse != nil {
+			if scrapeResp.StatusCode == http.StatusOK && c.modifyResponse != nil {
 				err = c.modifyResponse(scrapeResp)
 				if err != nil {
 					msg := fmt.Sprintf("failed to mutate scraped response, process: %s", process)

@@ -14,6 +14,7 @@
 package util
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,11 +23,11 @@ import (
 func EnsureHeaderTimeout(maxScrapeTimeout, defaultScrapeTimeout *time.Duration, h http.Header) {
 	timeoutSeconds, err := strconv.ParseFloat(h.Get("X-Prometheus-Scrape-Timeout-Seconds"), 64)
 	if err != nil { // invalid or not exists
-		h.Set("X-Prometheus-Scrape-Timeout-Seconds", defaultScrapeTimeout.String())
+		h.Set("X-Prometheus-Scrape-Timeout-Seconds", fmt.Sprintf("%d", int(defaultScrapeTimeout.Seconds())))
 		timeoutSeconds = defaultScrapeTimeout.Seconds()
 	}
 	if timeoutSeconds > maxScrapeTimeout.Seconds() {
-		h.Set("X-Prometheus-Scrape-Timeout-Seconds", maxScrapeTimeout.String())
+		h.Set("X-Prometheus-Scrape-Timeout-Seconds", fmt.Sprintf("%d", int(maxScrapeTimeout.Seconds())))
 	}
 }
 

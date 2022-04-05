@@ -152,10 +152,10 @@ func (c *Coordinator) start() {
 		switch msgType {
 		case util.MsgTypeRegister:
 			process := string(msg)
-			c.addScrapeTarget(fmt.Sprintf("%s:80/%s", c.fqdn, process))
+			c.addScrapeTarget(fmt.Sprintf("%s.%s:80", process, c.fqdn))
 		case util.MsgTypeDeregister:
 			process := string(msg)
-			c.delScrapeTarget(fmt.Sprintf("%s:80/%s", c.fqdn, process))
+			c.delScrapeTarget(fmt.Sprintf("%s.%s:80", process, c.fqdn))
 		default:
 			level.Warn(c.lg).Log("msg", "Error message type from conn"+conn.RemoteAddr().String())
 			conn.Close()

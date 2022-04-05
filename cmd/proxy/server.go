@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -20,6 +19,9 @@ import (
 	"github.com/prometheus-community/pushprox/util"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/prometheus/common/promlog"
+	"github.com/prometheus/common/promlog/flag"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -250,7 +252,18 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *httpHandler) handleScrape(w http.ResponseWriter, r *http.Request) {
 	h.s.mu.Lock()
-	c := h.s.remotes[r.URL.Hostname()]
+	// <process_name>.<fqdn>:80
+	host, _, err := net.SplitHostPort(r.Host)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	parts := strings.SplitN(host, ".", 2)
+	if len(parts) != 2 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	c := h.s.remotes[parts[1]]
 	h.s.mu.Unlock()
 	if c == nil {
 		w.WriteHeader(http.StatusNotFound)
@@ -261,27 +274,27 @@ func (h *httpHandler) handleScrape(w http.ResponseWriter, r *http.Request) {
 
 func getAuthTokens() ([]string, error) {
 	var tokens string
-	if authTokens != nil {
+	if authTokens != nil && *authTokens != "" {
 		tokens = *authTokens
 	}
-	if authTokenFile != nil {
+	if authTokenFile != nil && *authTokenFile != "" {
 		b, err := ioutil.ReadFile(*authTokenFile)
 		if err != nil {
 			return nil, err
 		}
 		tokens = string(b)
 	}
-	if tokens != "" {
-		return strings.Split(strings.TrimSpace(tokens), ","), nil
-	}
-	// default token is ""
-	return []string{""}, nil
+	return strings.Split(strings.TrimSpace(tokens), ","), nil
 }
 
 func main() {
+	promlogConfig := promlog.Config{}
+	flag.AddFlags(kingpin.CommandLine, &promlogConfig)
+	kingpin.HelpFlag.Short('h')
+	kingpin.Parse()
+	logger := promlog.New(&promlogConfig)
 	kingpin.Parse()
 	l, err := net.Listen("tcp", *listenServerAddress)
-	logger := log.NewLogfmtLogger(os.Stdout)
 	if err != nil {
 		level.Error(logger).Log("error", err)
 		os.Exit(1)
