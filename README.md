@@ -33,7 +33,7 @@ Run the proxy somewhere both Prometheus and the clients can get to:
 
 On every target machine run the client, pointing it at the proxy:
 ```
-./pushprox-client  --fqdn client --proxy-addr 127.0.0.1:7080 --auth-token my-pwd --metrics http://127.0.0.1:8900/metrics,http://localhost:8900/metrics --label-pairs env=e2e-test,node=mac
+./pushprox-client  --fqdn client --proxy-addr 127.0.0.1:7080 --auth-token my-pwd --metrics http://127.0.0.1:8900/metrics,http://127.0.0.1:9100/metrics --label-pairs env=e2e-test,node=mac
 ```
 
 ## Service Discovery
@@ -47,13 +47,13 @@ $ curl -s 127.1:8080/targets | jq
 [
   {
     "targets": [
-      "client:80/MTI3LjAuMC4xOjg5MDAvbWV0cmljcw=="
+      "MTI3LjAuMC4xOjg5MDAvbWV0cmljcw==.client:80"
     ],
     "labels": null
   },
   {
     "targets": [
-      "client:80/bG9jYWxob3N0Ojg5MDAvbWV0cmljcw=="
+      "MTI3LjAuMC4xOjkxMDAvbWV0cmljcw==.mac.client:80"
     ],
     "labels": null
   }
@@ -69,7 +69,7 @@ scrape_configs:
 - job_name: node
   proxy_url: http://proxy:8080/
   static_configs:
-    - targets: ['client:80/MTI3LjAuMC4xOjg5MDAvbWV0cmljcw==']  # Presuming the FQDN of the client is "client", and process HTTP endpoint is  http://127.0.0.1:8900
+    - targets: ['MTI3LjAuMC4xOjkxMDAvbWV0cmljcw==.mac.client:80']  # Presuming the FQDN of the client is "client", and process HTTP endpoint is  http://127.0.0.1:8900
 ```
 
 ## How It Works
